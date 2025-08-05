@@ -1,0 +1,538 @@
+---
+title: "Analysis of Film and Music Sales for Media Distributors, Inc."
+subtitle: "Prepared by Oakland Partners"
+author: "Hariharasudan Savithri Anbarasu"
+date: "Full Summer 2025"
+output: 
+  html_document:
+    toc: true
+    toc_float: 
+      collapsed: true
+    toc_depth: 2
+    number_sections: true
+    theme: paper
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+# Load required libraries
+if (!require("DBI")) install.packages("DBI")
+if (!require("RMySQL")) install.packages("RMySQL")
+if (!require("kableExtra")) install.packages("kableExtra")
+if (!require("ggplot2")) install.packages("ggplot2")
+
+library(DBI)
+library(RMySQL)
+library(kableExtra)
+library(ggplot2)
+
+# Set sqldf to use SQLite
+options(sqldf.driver = 'SQLite')
+```
+
+```{r connect-db}
+# Database connection function
+connectDB <- function(){
+  # Database connection parameters
+  db_user <- "avnadmin"
+  db_password <- "AVNS_s5fw-5CC0zMcdySooAU"
+  db_host <- "mysql-practicum-1-practicum-1-hariharasudan.f.aivencloud.com"
+  db_port <- 28796
+  db_name <- "defaultdb"
+  
+  # DB Connection
+  tryCatch({
+    con <- dbConnect(
+      MySQL(),
+      user = db_user,
+      password = db_password,
+      host = db_host,
+      port = db_port,
+      dbname = db_name
+    )
+    return(con)
+  }, error = function(e) {
+    stop("Database connection failed:", e$message)
+  })
+}
+
+# Connect to database
+con <- connectDB()
+```
+
+# Background
+
+Media Distributors, Inc. is a Wichita, KY based distributor and seller of films and music for commercial purposes. For the past few years, it has managed its film and music sales separately using different applications. This division is historical as *Media Distributors* started distributing films and then acquired *SoundMania* about two years ago. As the two distribution channels were different, CTO Alvin Coelho made the decision not to integrate the *SoundMania*'s information systems and database with those of *Media Distributors*. This has not been a problem until now, however *Media Distributors* intends to make itself available for acquisition. To that end, an integrated view of the business, particularly sales, is needed.
+
+This report provides key sales, revenue, and customer metrics to showcase *Media Distributors* business. The analysis provided is based on data from a custom-built datamart containing data extracted from two operational databases.
+
+# Key Business Metrics
+
+This sections provides key revenue and customer information segmented by time, country, and business unit. Revenue numbers are in US$.
+
+## Sales Revenue
+
+```{r revenue-summary}
+# Get the actual date range from the data
+date_range_sql <- "
+  SELECT 
+    MIN(year) as min_year,
+    MAX(year) as max_year
+  FROM fact_sales
+"
+date_range <- dbGetQuery(con, date_range_sql)
+min_year <- date_range$min_year
+max_year <- date_range$max_year
+
+# Get year with most sales
+year_revenue_sql <- "
+  SELECT year, SUM(revenue) as total_revenue
+  FROM fact_sales
+  GROUP BY year
+  ORDER BY total_revenue DESC
+  LIMIT 1
+"
+year_max <- dbGetQuery(con, year_revenue_sql)
+
+# Get country with most sales
+country_revenue_sql <- paste0("
+  SELECT country, year, SUM(revenue) as total_revenue
+  FROM fact_sales
+  GROUP BY country, year
+  ORDER BY total_revenue DESC
+  LIMIT 2
+")
+country_max <- dbGetQuery(con, country_revenue_sql)
+```
+
+The year with the most sales was `r year_max$year` with a total revenue across both business units of **$`r format(round(year_max$total_revenue), big.mark=",")`**. The country with the most sales was `r country_max$country[1]` with total sales across both business units in `r country_max$year[1]` of **$`r format(round(country_max$total_revenue[1]), big.mark=",")`**. It was followed by the `r country_max$country[2]` with **$`r format(round(country_max$total_revenue[2]), big.mark=",")`**.
+
+The table below shows sales revenue by country and ordered by total sales for the two most recent years, `r max_year - 1` and `r max_year`. The table is restricted to the top five countries with the most sales. The column 'Total' in the table represents the total for all years for which there is data and not just the past two years.
+
+```{r revenue-by-country}
+# Get revenue by country for recent years
+revenue_by_country_sql <- paste0("
+  SELECT 
+    country,
+    SUM(CASE WHEN year = ", max_year - 1, " THEN revenue ELSE 0 END) as revenue_prev,
+    SUM(CASE WHEN year = ", max_year, " THEN revenue ELSE 0 END) as revenue_current,
+    SUM(revenue) as total_revenue
+  FROM fact_sales
+  GROUP BY country
+  ORDER BY total_revenue DESC
+  LIMIT 5
+")
+
+revenue_by_country <- dbGetQuery(con, revenue_by_country_sql)
+
+# Format the table
+revenue_by_country %>%
+  kbl(caption = "Total Revenue For Top Five Countries For Most Recent Two Years",
+      col.names = c("", as.character(max_year - 1), as.character(max_year), "Total (All Years)"),
+      format.args = list(big.mark = ",", nsmall = 2),
+      align = c('l', 'r', 'r', 'r')) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"),
+                full_width = FALSE) %>%
+  add_header_above(c(" " = 1, "Revenue Per Year" = 2, " " = 1)) %>%
+  column_spec(1, bold = TRUE) %>%
+  column_spec(4, bold = TRUE, background = "#f0f0f0")
+```
+
+The table below shows the revenue broken down by quarter for the top five countries. It shows the total revenue for each quarter across all business units and years. So, for example, the column "Q1" is the total sales for music and film for all years for which there is data, which is from `r min_year` to `r max_year`.
+
+```{r quarterly-revenue}
+# Get quarterly revenue
+quarterly_revenue_sql <- "
+  SELECT 
+    fs.country,
+    SUM(CASE WHEN fs.quarter = 1 THEN fs.revenue ELSE 0 END) as Q1,
+    SUM(CASE WHEN fs.quarter = 2 THEN fs.revenue ELSE 0 END) as Q2,
+    SUM(CASE WHEN fs.quarter = 3 THEN fs.revenue ELSE 0 END) as Q3,
+    SUM(CASE WHEN fs.quarter = 4 THEN fs.revenue ELSE 0 END) as Q4,
+    AVG(fs.revenue) as avg_revenue
+  FROM fact_sales fs
+  JOIN (
+    SELECT country
+    FROM fact_sales
+    GROUP BY country
+    ORDER BY SUM(revenue) DESC
+    LIMIT 5
+  ) top_countries
+  ON fs.country = top_countries.country
+  GROUP BY fs.country
+  ORDER BY (Q1 + Q2 + Q3 + Q4) DESC
+"
+
+
+quarterly_revenue <- dbGetQuery(con, quarterly_revenue_sql)
+
+# Format the table
+quarterly_revenue %>%
+  kbl(caption = "Cumulative and Average Quarterly Revenue",
+      format.args = list(big.mark = ",", nsmall = 0),
+      align = c('l', 'r', 'r', 'r', 'r', 'r')) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"),
+                full_width = FALSE) %>%
+  add_header_above(c(" " = 1,
+                     setNames(4, paste0("Quarterly Revenue ", min_year, " to ", max_year)),
+                     " " = 1)) %>%
+  column_spec(1, bold = TRUE) %>%
+  row_spec(0, bold = TRUE)
+
+```
+
+## Customer Distribution
+
+```{r customer-summary}
+# Get customer counts
+customer_summary_sql <- "
+  SELECT 
+    COUNT(DISTINCT customer_key) as total_customers,
+    COUNT(DISTINCT country) as total_countries
+  FROM dim_customer
+"
+customer_summary <- dbGetQuery(con, customer_summary_sql)
+
+# Get top countries by customers
+top_countries_sql <- "
+  SELECT country
+  FROM dim_customer
+  GROUP BY country
+  ORDER BY COUNT(*) DESC
+  LIMIT 3
+"
+top_countries <- dbGetQuery(con, top_countries_sql)
+```
+
+Across both business units, there are **`r format(customer_summary$total_customers, big.mark=",")`** customers in **`r customer_summary$total_countries`** different countries, with the majority of customers in `r paste(top_countries$country, collapse=", ")`.
+
+```{r customer-by-type}
+# Get customers by business unit and country
+customers_by_type_sql <- "
+  SELECT 
+    dc.country,
+    SUM(CASE WHEN dc.customer_type = 'film' THEN 1 ELSE 0 END) as film_customers,
+    SUM(CASE WHEN dc.customer_type = 'music' THEN 1 ELSE 0 END) as music_customers,
+    COUNT(*) as total_customers
+  FROM dim_customer dc
+  JOIN (
+    SELECT country
+    FROM dim_customer
+    GROUP BY country
+    ORDER BY COUNT(*) DESC
+    LIMIT 5
+  ) top_countries
+  ON dc.country = top_countries.country
+  GROUP BY dc.country
+  ORDER BY total_customers DESC
+"
+
+customers_by_type <- dbGetQuery(con, customers_by_type_sql)
+
+# Format the table
+customers_by_type %>%
+  kbl(caption = "Customers by Business Unit",
+      col.names = c("", "Film", "Music", "Total"),
+      format.args = list(big.mark = ","),
+      align = c('l', 'r', 'r', 'r')) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"),
+                full_width = FALSE) %>%
+  column_spec(1, bold = TRUE) %>%
+  column_spec(4, bold = TRUE, background = "#f0f0f0")
+```
+
+## Film vs Music Revenue
+
+Sales fluctuate over time and the table below shows total revenue per month for the years for which we have data.
+
+```{r revenue-by-business}
+# Get all years in the data
+years_sql <- "SELECT DISTINCT year FROM fact_sales ORDER BY year"
+all_years <- dbGetQuery(con, years_sql)$year
+
+# Get revenue by year and business unit
+revenue_by_business_sql <- "
+  SELECT 
+    year,
+    SUM(CASE WHEN product_type = 'film' THEN revenue ELSE 0 END) as film_revenue,
+    SUM(CASE WHEN product_type = 'music' THEN revenue ELSE 0 END) as music_revenue
+  FROM fact_sales
+  GROUP BY year
+  ORDER BY year
+"
+
+revenue_by_business <- dbGetQuery(con, revenue_by_business_sql)
+
+# Create dynamic columns based on actual years
+revenue_matrix <- matrix(nrow = 2, ncol = length(all_years) + 2)
+colnames(revenue_matrix) <- c(" ", as.character(all_years), "Total")
+revenue_matrix[1, 1] <- "Film"
+revenue_matrix[2, 1] <- "Music"
+
+# Fill in the revenue data
+for (i in 1:length(all_years)) {
+  year_data <- revenue_by_business[revenue_by_business$year == all_years[i], ]
+  if (nrow(year_data) > 0) {
+    revenue_matrix[1, i + 1] <- year_data$film_revenue
+    revenue_matrix[2, i + 1] <- year_data$music_revenue
+  } else {
+    revenue_matrix[1, i + 1] <- 0
+    revenue_matrix[2, i + 1] <- 0
+  }
+}
+
+# Add totals
+revenue_matrix[1, ncol(revenue_matrix)] <- sum(revenue_by_business$film_revenue)
+revenue_matrix[2, ncol(revenue_matrix)] <- sum(revenue_by_business$music_revenue)
+
+# Convert to data frame
+revenue_summary <- as.data.frame(revenue_matrix, stringsAsFactors = FALSE)
+
+# Convert numeric columns
+for (i in 2:ncol(revenue_summary)) {
+  revenue_summary[, i] <- as.numeric(revenue_summary[, i])
+}
+
+# Format the table
+revenue_summary %>%
+  kbl(caption = "Revenue by year and business unit",
+      format.args = list(big.mark = ",", nsmall = 0),
+      align = c('l', rep('r', ncol(revenue_summary) - 1))) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"),
+                full_width = FALSE) %>%
+  column_spec(1, bold = TRUE) %>%
+  column_spec(ncol(revenue_summary), bold = TRUE, background = "#f0f0f0")
+```
+
+The graph below illustrates the quarterly growth of the film and music business over the past years for which we have data.
+
+```{r revenue-chart, fig.width=10, fig.height=6}
+# Get quarterly revenue data for chart
+quarterly_data_sql <- "
+  SELECT 
+    year,
+    quarter,
+    product_type,
+    SUM(revenue) as revenue
+  FROM fact_sales
+  GROUP BY year, quarter, product_type
+  ORDER BY year, quarter, product_type
+"
+
+quarterly_data <- dbGetQuery(con, quarterly_data_sql)
+
+# Create quarter labels
+quarterly_data$quarter_label <- paste0(quarterly_data$year, " Q", quarterly_data$quarter)
+
+# Create the plot
+ggplot(quarterly_data, aes(x = quarter_label, y = revenue, color = product_type, group = product_type)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 3) +
+  scale_y_continuous(trans = "log2", labels = scales::dollar_format()) +
+  scale_color_manual(values = c("film" = "#FF6B6B", "music" = "#4ECDC4"),
+                     labels = c("Film", "Music")) +
+  labs(title = "Revenue Comparison by Business Unit (Log Scale)",
+       x = "Quarter",
+       y = "Revenue ($, log scale)",
+       color = "Product") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+        legend.position = "right",
+        panel.grid.minor = element_blank())
+
+```
+
+In terms of units sold, the table below sheds light on this by country and by business unit.
+
+```{r units-sold-table}
+# Get the three most recent years
+recent_years_sql <- "SELECT DISTINCT year FROM fact_sales ORDER BY year DESC LIMIT 3"
+recent_years <- sort(dbGetQuery(con, recent_years_sql)$year)
+
+# Get units sold by country and quarter for recent years
+units_sql <- paste0("
+  SELECT 
+    country,
+    quarter,
+    year,
+    SUM(units_sold) as units
+  FROM fact_sales
+  WHERE year IN (", paste(recent_years, collapse = ", "), ")
+    AND country IN ('Canada', 'United States', 'Brazil')
+  GROUP BY country, quarter, year
+  ORDER BY country, year, quarter
+")
+
+units_data <- dbGetQuery(con, units_sql)
+
+# Create formatted table for each country
+create_country_table <- function(country_name, data, years) {
+  country_data <- data[data$country == country_name, ]
+  
+  # Reshape data
+  summary_table <- data.frame(
+    Quarter = c("Q1", "Q2", "Q3", "Q4", "Total", "Average")
+  )
+  
+  for (yr in years) {
+    yr_data <- country_data[country_data$year == yr, ]
+    if (nrow(yr_data) > 0) {
+      q_values <- c(
+        sum(yr_data$units[yr_data$quarter == 1]),
+        sum(yr_data$units[yr_data$quarter == 2]),
+        sum(yr_data$units[yr_data$quarter == 3]),
+        sum(yr_data$units[yr_data$quarter == 4])
+      )
+      total <- sum(q_values)
+      avg <- mean(q_values)
+      summary_table[[as.character(yr)]] <- c(q_values, total, avg)
+    } else {
+      summary_table[[as.character(yr)]] <- c(0, 0, 0, 0, 0, 0)
+    }
+  }
+  
+  # Add total and average columns
+  if (length(years) > 0) {
+    summary_table$Total <- rowSums(summary_table[, 2:(length(years) + 1)])
+    summary_table$Average <- round(rowMeans(summary_table[, 2:(length(years) + 1)]))
+  }
+  
+  return(summary_table)
+}
+
+```
+
+## Number of units sold by country and business unit for past three years.
+```{r units-countries}
+# Get the three most recent years
+recent_years_sql <- "SELECT DISTINCT year FROM fact_sales ORDER BY year DESC LIMIT 3"
+recent_years <- sort(dbGetQuery(con, recent_years_sql)$year)
+
+# Get units sold by country and quarter for recent years
+units_sql <- paste0("
+  SELECT 
+    country,
+    quarter,
+    year,
+    SUM(units_sold) as units
+  FROM fact_sales
+  WHERE year IN (", paste(recent_years, collapse = ", "), ")
+    AND country IN ('Canada', 'United States', 'Brazil')
+  GROUP BY country, quarter, year
+  ORDER BY country, year, quarter
+")
+
+units_data <- dbGetQuery(con, units_sql)
+
+# Create a combined table for all countries
+all_countries <- c("Canada", "United States", "Brazil")
+
+# Initialize the results list
+results_list <- list()
+
+for (country in all_countries) {
+  country_data <- units_data[units_data$country == country, ]
+  
+  # Add country header
+  results_list[[length(results_list) + 1]] <- data.frame(
+    col1 = paste0("**", ifelse(country == "United States", "USA", country), "**"),
+    col2 = "", col3 = "", col4 = "", col5 = "", col6 = ""
+  )
+  
+  # Add blank row
+  results_list[[length(results_list) + 1]] <- data.frame(
+    col1 = "", col2 = "", col3 = "", col4 = "", col5 = "", col6 = ""
+  )
+  
+  # Add data rows for each quarter
+  for (q in 1:4) {
+    row_data <- data.frame(col1 = paste0("Q", q))
+    
+    for (yr in recent_years) {
+      val <- country_data[country_data$year == yr & country_data$quarter == q, "units"]
+      row_data[[paste0("col", which(recent_years == yr) + 1)]] <- ifelse(length(val) > 0, format(val, big.mark = ","), "0")
+    }
+    
+    # Calculate total and average
+    q_data <- country_data[country_data$quarter == q, "units"]
+    total <- ifelse(length(q_data) > 0, sum(q_data), 0)
+    avg <- ifelse(length(q_data) > 0, round(mean(q_data)), 0)
+    
+    row_data[["col5"]] <- format(total, big.mark = ",")
+    row_data[["col6"]] <- format(avg, big.mark = ",")
+    
+    results_list[[length(results_list) + 1]] <- row_data
+  }
+  
+  # Add Total row
+  total_row <- data.frame(col1 = "Total")
+  for (yr in recent_years) {
+    yr_total <- sum(country_data[country_data$year == yr, "units"])
+    total_row[[paste0("col", which(recent_years == yr) + 1)]] <- format(yr_total, big.mark = ",")
+  }
+  grand_total <- sum(country_data$units)
+  total_row[["col5"]] <- format(grand_total, big.mark = ",")
+  total_row[["col6"]] <- format(round(grand_total / length(recent_years)), big.mark = ",")
+  results_list[[length(results_list) + 1]] <- total_row
+  
+  # Add Average row
+  avg_row <- data.frame(col1 = "Average")
+  for (yr in recent_years) {
+    yr_data <- country_data[country_data$year == yr, "units"]
+    yr_avg <- ifelse(length(yr_data) > 0, round(mean(yr_data)), 0)
+    avg_row[[paste0("col", which(recent_years == yr) + 1)]] <- format(yr_avg, big.mark = ",")
+  }
+  overall_avg <- round(mean(country_data$units))
+  avg_row[["col5"]] <- format(overall_avg * 4, big.mark = ",")  # Total of averages
+  avg_row[["col6"]] <- format(overall_avg, big.mark = ",")
+  results_list[[length(results_list) + 1]] <- avg_row
+  
+  # Add blank row between countries (except after last country)
+  if (country != "Brazil") {
+    results_list[[length(results_list) + 1]] <- data.frame(
+      col1 = "", col2 = "", col3 = "", col4 = "", col5 = "", col6 = ""
+    )
+  }
+}
+
+# Combine all rows
+combined_table <- do.call(rbind, results_list)
+names(combined_table) <- c("", as.character(recent_years), "Total", "Average")
+
+# Create the table with proper formatting
+combined_table %>%
+  kbl(align = c('l', rep('c', length(recent_years) + 2)),
+      escape = FALSE) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"),
+                full_width = FALSE,
+                position = "left") %>%
+  add_header_above(c(" " = 1, "Years" = length(recent_years), " " = 2)) %>%
+  row_spec(c(7, 8, 15, 16, 23, 24), bold = TRUE, background = "#f0f0f0") %>%
+  column_spec(1, width = "100px") %>%
+  column_spec(2:(length(recent_years) + 3), width = "80px")
+```
+# Summary and Recommendations
+
+```{r final-summary}
+# Get key metrics for summary
+
+years_film <- dbGetQuery(con, "SELECT MIN(year) as minYear, MAX(year) as maxYear FROM fact_sales WHERE product_type = 'film'")
+years_music <- dbGetQuery(con, "SELECT MIN(year) as minYear, MAX(year) as maxYear FROM fact_sales WHERE product_type = 'music'")
+total_revenue_max_year <- dbGetQuery(con, paste0("SELECT SUM(revenue) as total FROM fact_sales WHERE year = ", year_max$year[1]))$total
+total_customers <- dbGetQuery(con, "SELECT COUNT(DISTINCT customer_key) as total FROM dim_customer")$total
+total_countries <- dbGetQuery(con, "SELECT COUNT(DISTINCT country) as total FROM dim_customer")$total
+```
+
+Based on the available data, the analysis of Media Distributors, Inc.'s film and music sales reveals a robust revenue generation pattern, with Canada and the United States emerging as the primary contributors to the company's total sales. Between `r min_year` and `r max_year`, sales peaked in `r year_max$year[1]`, with total revenue reaching **$`r format(round(total_revenue_max_year), big.mark=",")`** across both business units. Revenue contributions from music and film were significantly uneven. Music sales showed more consistency from `r years_music$minYear` to `r years_music$maxYear`, while film sales dominated in `r years_film$minYear` and `r years_film$maxYear`. Geographic trends also played a key role, with `r revenue_by_country$country[1]` and `r revenue_by_country$country[2]` leading film consumption. The customer base is concentrated in `r top_countries$country[1]`, `r top_countries$country[2]`, `r top_countries$country[3]`, which also serve as the top-performing markets.
+
+
+
+Despite these strengths, Media Distributors, Inc. faces challenges related to its siloed information systems. With plans for acquisition, the company must present a cohesive and integrated business view to appeal to potential buyers. With nearly **`r format(round(total_customers, -1), big.mark=",")`** customers across **`r total_countries`** countries, *Media Distributors* should invest in customer relationship management (CRM) tools to personalize outreach and foster loyalty. Segmenting customers by preferences (film or music) and spending habits can optimize targeting.
+
+```{r cleanup, include=FALSE}
+# Close database connection
+dbDisconnect(con)
+```
