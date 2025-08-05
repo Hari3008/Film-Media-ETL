@@ -13,7 +13,7 @@ library(RSQLite)
 
 connectDB <- function(){
   db_user <- "avnadmin"
-  db_password <- "AVNS_s5fw-5CC0zMcdySooAU"
+  db_password <- "XXXXXXX"
   db_host <- "mysql-practicum-1-practicum-1-hariharasudan.f.aivencloud.com"
   db_port <- 28796
   db_name <- "defaultdb"
